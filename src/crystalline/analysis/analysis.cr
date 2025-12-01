@@ -81,7 +81,9 @@ module Crystalline::Analysis
 
     unless ignore_diagnostics
       result.program.requires.each do |path|
-        diagnostics.init_value("file://#{path}")
+        unless path.starts_with?("/usr/lib/crystal/")
+          diagnostics.init_value("file://#{path}")
+        end
       end
 
       result.program.error_stack.try &.each do |e|
@@ -233,5 +235,112 @@ module Crystalline::Analysis
 
   def self.context_at(result : Crystal::Compiler::Result, location : Crystal::Location) : Hash(String, Crystal::Type)?
     Crystal::ContextVisitor.new(location).process(result).contexts.try &.last?
+  end
+
+  def self.signature_help_at_cursor(result : Crystal::Compiler::Result, location : Crystal::Location, context : LSP::SignatureHelpContext?) : LSP::SignatureHelp?
+    nodes, _context = nodes_at_cursor(result, location)
+    LSP::Log.debug { "signature_help_at_cursor: found #{nodes.size} nodes at cursor" }
+    LSP::Log.debug { "signature_help_at_cursor: node types: #{nodes.map(&.class.name)}" }
+
+    call_node = find_call_node(nodes, location)
+    LSP::Log.debug { "signature_help_at_cursor: call_node = #{call_node.inspect}" }
+
+    return nil unless call_node
+
+    def_node = find_method_definition(result, call_node)
+    LSP::Log.debug { "signature_help_at_cursor: def_node = #{def_node.inspect}" }
+    return nil unless def_node
+
+    active_parameter = calculate_active_parameter(call_node, location)
+    max_param_index = Math.max(0, def_node.args.size - 1)
+    clamped_active_parameter = Math.min(active_parameter, max_param_index)
+
+    build_signature_help(def_node, clamped_active_parameter)
+  end
+
+  def self.find_call_node(nodes : Array(Crystal::ASTNode), location : Crystal::Location) : Crystal::Call?
+    nodes.reverse_each do |node|
+      return node if node.is_a?(Crystal::Call)
+    end
+    nil
+  end
+
+  def self.find_method_definition(result : Crystal::Compiler::Result, call_node : Crystal::Call) : Crystal::Def?
+    if target_def = call_node.target_defs.try &.first?
+      return target_def
+    end
+
+    method_name = call_node.name
+
+    if method_name.empty?
+      LSP::Log.debug { "find_method_definition: method name is empty, returning nil" }
+      return nil
+    end
+
+    LSP::Log.debug { "find_method_definition: searching for method '#{method_name}' in program" }
+
+    program = result.program
+    if program.is_a?(Crystal::NonGenericModuleType)
+      defs = program.defs
+      def_with_metadata = defs.try(&.[method_name]?).try(&.first?)
+
+      if def_with_metadata
+        LSP::Log.debug { "find_method_definition: found def_with_metadata for '#{method_name}'" }
+        return def_with_metadata.def
+      end
+    end
+
+    LSP::Log.debug { "find_method_definition: no definition found for '#{method_name}'" }
+    nil
+  end
+
+  def self.calculate_active_parameter(call_node : Crystal::Call, location : Crystal::Location) : Int32
+    args = call_node.args
+    return 0 if args.empty?
+
+    args.each_with_index do |arg, index|
+      arg_start = arg.location
+      arg_end = arg.end_location
+      next unless arg_start
+
+      if location < arg_start
+        return index
+      end
+
+      if arg_end && location.between?(arg_start, arg_end)
+        return index
+      end
+    end
+
+    args.size
+  end
+
+  def self.build_signature_help(def_node : Crystal::Def, active_parameter : Int32) : LSP::SignatureHelp
+    signature_label = Utils.format_def(def_node)
+
+    parameters = def_node.args.map do |arg|
+      param_label = if arg.restriction
+                      "#{arg.name} : #{arg.restriction}"
+                    else
+                      arg.name
+                    end
+
+      LSP::ParameterInformation.new(
+        label: param_label,
+        documentation: arg.doc
+      )
+    end
+
+    LSP::SignatureHelp.new(
+      signatures: [
+        LSP::SignatureInformation.new(
+          label: signature_label,
+          documentation: def_node.doc,
+          parameters: parameters
+        ),
+      ],
+      active_signature: 0,
+      active_parameter: active_parameter
+    )
   end
 end
