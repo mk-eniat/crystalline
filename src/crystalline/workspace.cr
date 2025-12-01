@@ -310,6 +310,19 @@ class Crystalline::Workspace
     nil
   end
 
+  def signature_help(server : LSP::Server, file_uri : URI, position : LSP::Position, context : LSP::SignatureHelpContext?)
+    result = self.compile(server, file_uri, in_memory: true, wants_doc: true)
+    location = Crystal::Location.new(
+      file_uri.decoded_path,
+      line_number: position.line + 1,
+      column_number: position.character + 1
+    )
+
+    result.try { |r|
+      Analysis.signature_help_at_cursor(r, location, context)
+    }
+  end
+
   def definitions(server : LSP::Server, file_uri : URI, position : LSP::Position)
     result = self.compile(server, file_uri, in_memory: true, wants_doc: true)
     location = Crystal::Location.new(
